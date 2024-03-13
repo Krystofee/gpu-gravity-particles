@@ -1,5 +1,7 @@
 
-# Gravity Simulation README
+# Gravity Simulation
+
+It's a project I've made out of curiosity for simulations. It's almost 38k challenge with the difference that i've written it in the mountains without any internet. Later when I had internet, I rewrote the computational engine to use gpu.js, because believe or not, the simulation of many points with mass and valocity can be very effectively parallelized using GPU. Below is chat gpt 4-generated readme to save my future self from guessing.
 
 ![screen.png](.img/pic.png)
 
