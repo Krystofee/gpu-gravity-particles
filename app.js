@@ -1,31 +1,107 @@
-const G = 2;
+window.onload = function () {
+  const G = 6.6743;
 
-class Canvas {
-  SHOW_TEXT = false;
+  const canvasElm = document.getElementById("canvas");
+  const gpu = new GPU.GPU({ mode: "webgl2" });
 
-  SCALE = 0.125;
-  PIXEL_SCALE = 2;
+  const WIDTH = canvasElm.clientWidth;
+  const HEIGHT = canvasElm.clientHeight;
 
-  constructor(canvas) {
-    this.canvas = canvas;
-    this.ctx = canvas.getContext("2d");
+  const DEVICE_WIDTH = WIDTH * window.devicePixelRatio;
+  const DEVICE_HEIGHT = HEIGHT * window.devicePixelRatio;
 
-    this.WIDTH = canvas.clientWidth;
-    this.HEIGHT = canvasElm.clientHeight;
+  const PIXEL_SCALE = 2;
 
-    this.DEVICE_WIDTH = this.WIDTH * window.devicePixelRatio;
-    this.DEVICE_HEIGHT = this.HEIGHT * window.devicePixelRatio;
+  const SCALE = 1 / 8;
+  const SCALED_WIDTH = Math.floor(WIDTH / SCALE);
+  const SCALED_HEIGHT = Math.floor(HEIGHT / SCALE);
 
-    this.SCALED_WIDTH = Math.floor(this.WIDTH / this.SCALE);
-    this.SCALED_HEIGHT = Math.floor(this.HEIGHT / this.SCALE);
+  function initParticles(particles) {
+    function addParticle(mass, p, v, isStatic = false) {
+      particles.push({
+        id: particles.length,
+        mass: mass,
+        position: p,
+        velocity: v,
+        isStatic,
+      });
+    }
 
-    this.imageData = null;
+    function addGalaxy(mass, C, R, N) {
+      for (let i = 0; i < N; i++) {
+        const r = R * Math.sqrt(Math.random());
+        const theta = Math.random() * 2 * Math.PI;
 
-    this.init();
+        const p = C.add(new Vec2(r * Math.sin(theta), r * Math.cos(theta)));
+
+        const v = C.distance(p)
+          .normal()
+          .normalize()
+          .numMul(Math.random() * Math.sqrt((G * 100) / r) * 5);
+
+        // const v = new Vec2(0, 0);
+
+        addParticle(20, p, v);
+      }
+
+      addParticle(mass, C, new Vec2(0, 0), true);
+    }
+
+    addGalaxy(100, new Vec2(SCALED_WIDTH / 2, SCALED_HEIGHT / 2), 1000, 20000);
+    // addGalaxy(1000, new Vec2(SCALED_WIDTH / 2 - 1000, SCALED_HEIGHT / 2), 700, 2000);
   }
 
-  init() {
-    if (window.devicePixelRatio > 1) {
+  let particles = new Array();
+  initParticles(particles);
+
+  const particlesCount = particles.length;
+
+  const computeForcesKernel = gpu
+    .createKernel(function (particlesVec4, deviceWidth, deviceHeight, devicePixelRatio, SCALE, G) {
+      const x = this.thread.x;
+      const y = this.thread.y;
+
+      let totalAx = 0.0;
+      let totalAy = 0.0;
+
+      for (let i = 0; i < this.constants.particlesCount; i++) {
+        const px = particlesVec4[i][0] * SCALE * devicePixelRatio;
+        const py = particlesVec4[i][1] * SCALE * devicePixelRatio;
+        const mass = particlesVec4[i][2];
+
+        const dx = x - px;
+        const dy = y - py;
+        const dSq = dx * dx + dy * dy;
+
+        const fMagnitude = (G * mass) / (dSq + 0.00000001);
+        const distInv = 1.0 / Math.sqrt(dSq + 0.00000001);
+        totalAx += dx * fMagnitude * distInv;
+        totalAy += dy * fMagnitude * distInv;
+      }
+
+      const accelerationMagnitude = Math.sqrt(totalAx * totalAx + totalAy * totalAy);
+      const cappedAcceleration = Math.min(accelerationMagnitude, 400);
+      const normalizedAcceleration = cappedAcceleration / 400;
+      const shadow = Math.pow(normalizedAcceleration, 0.5) * 255;
+
+      return [shadow, 0, 255 - shadow, 255]; // Return RGBA values.
+    })
+    .setOutput([DEVICE_WIDTH, DEVICE_HEIGHT])
+    .setConstants({ particlesCount });
+
+  class Canvas {
+    SHOW_TEXT = false;
+
+    constructor(canvas) {
+      this.canvas = canvas;
+      this.ctx = canvas.getContext("2d");
+
+      this.imageData = null;
+
+      this.init();
+    }
+
+    init() {
       var canvasWidth = this.canvas.width;
       var canvasHeight = this.canvas.height;
 
@@ -35,198 +111,213 @@ class Canvas {
       this.canvas.style.height = canvasHeight + "px";
 
       this.ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+
+      this.ctx.fillStyle = `rgb(255, 255, 255)`;
+      this.ctx.fillRect(0, 0, WIDTH, HEIGHT);
     }
 
-    this.ctx.fillStyle = `rgb(255, 255, 255)`;
-    this.ctx.fillRect(0, 0, this.WIDTH, this.HEIGHT);
-  }
+    renderBackgroundOld(particles) {
+      const shouldCompute = Math.random() < 0.001;
 
-  renderBackground(particles) {
-    if (!this.imageData) {
-      const imageData = this.ctx.createImageData(this.DEVICE_WIDTH, this.DEVICE_HEIGHT);
-      const data = imageData.data;
+      if (!this.imageData || shouldCompute) {
+        const imageData = this.ctx.createImageData(DEVICE_WIDTH, DEVICE_HEIGHT);
+        const data = imageData.data;
 
-      const staticParticles = particles.filter((p) => p.isStatic);
+        // const staticParticles = particles.filter((p) => p.isStatic);
+        const staticParticles = particles;
 
-      // for (let i = 0; i < data.length; i += 4) {
-      //   data[i] = Math.floor(Math.random() * 255);
-      //   data[i + 1] = Math.floor(Math.random() * 255);
-      //   data[i + 2] = Math.floor(Math.random() * 255);
-      //   data[i + 3] = 255;
-      // }
+        let pixelForces = new Uint32Array(DEVICE_HEIGHT * DEVICE_WIDTH);
+        let maxForce = -Infinity;
+        let minForce = Infinity;
 
-      let pixelForces = new Uint32Array(this.DEVICE_HEIGHT * this.DEVICE_WIDTH);
-      let maxForce = -Infinity;
-      let minForce = Infinity;
+        for (let y = 0; y < DEVICE_HEIGHT; y++) {
+          for (let x = 0; x < DEVICE_WIDTH; x++) {
+            const point = new Vec2(x, y);
 
-      for (let y = 0; y < this.DEVICE_HEIGHT; y++) {
-        for (let x = 0; x < this.DEVICE_WIDTH; x++) {
-          const point = new Vec2(x, y);
+            // compute force which influences on every pixel on the screen,
+            // which is generated by the static particles
+            let totalAcceleration = new Vec2(0, 0);
 
-          // compute force which influences on every pixel on the screen,
-          // which is generated by the static particles
-          let acceleration = staticParticles.reduce((acc, p) => {
-            const dist = point.distance(p.position.numMul(this.SCALE * window.devicePixelRatio));
-            const dSq = dist.lengthSq();
-            const f = (G * p.mass) / (dSq + 0.0001);
+            let acceleration = staticParticles.forEach((p) => {
+              const directionToParticle = p.position.numMul(SCALE * window.devicePixelRatio).sub(point);
+              const dSq = directionToParticle.lengthSq();
+              const fMagnitude = (G * p.mass) / (dSq + 0.00000001);
 
-            const result = Math.min((dist.length() * f) / Math.sqrt(dSq), 10);
+              // Calculate the acceleration vector
+              const acceleration = directionToParticle.normalize().numMul(fMagnitude);
+              totalAcceleration = totalAcceleration.add(acceleration);
+            });
 
-            if (result.toString() === "NaN") return acc + 0.1;
+            let accelerationMagnitude = totalAcceleration.length();
 
-            return acc + result;
-          }, 0);
+            if (isNaN(accelerationMagnitude)) {
+              accelerationMagnitude = 0.1;
+            }
 
-          pixelForces[y * this.DEVICE_HEIGHT + x] = acceleration;
-          maxForce = Math.max(maxForce, acceleration);
-          minForce = Math.min(minForce, acceleration);
+            accelerationMagnitude = Math.min(accelerationMagnitude, 50);
 
-          // console.log("Set", y * this.SCALED_HEIGHT + x, " to", acceleration);
+            pixelForces[y * DEVICE_HEIGHT + x] = accelerationMagnitude;
+            maxForce = Math.max(maxForce, accelerationMagnitude);
+            minForce = Math.min(minForce, accelerationMagnitude);
+          }
+        }
+
+        // pixelForces = pixelForces.map((n) => (n / maxForce) * 255);
+
+        const gamma = 0.5; // example value; can be adjusted
+        pixelForces = pixelForces.map((n) => Math.pow(n / maxForce, gamma) * 255);
+
+        for (let i = 0; i < data.length; i += 4) {
+          const shadow = Math.floor(pixelForces[i / 4]);
+          data[i] = shadow;
+          data[i + 1] = 0;
+          data[i + 2] = 255 - shadow;
+          data[i + 3] = 255;
+          // data[i] = 255;
+          // data[i + 1] = 255;
+          // data[i + 2] = 255;
+          // data[i + 3] = 255;
+        }
+
+        this.imageData = imageData;
+      }
+
+      this.ctx.putImageData(this.imageData, 0, 0);
+    }
+
+    renderBackground(particles) {
+      if (!this.imageData) {
+        const particlesVec4 = particles.map((p) => [p.position.x, p.position.y, p.mass, 0]);
+        const output = computeForcesKernel(particlesVec4, DEVICE_WIDTH, DEVICE_HEIGHT, window.devicePixelRatio, SCALE, G);
+        this.imageData = new ImageData(DEVICE_WIDTH, DEVICE_HEIGHT);
+        let k = 0; // Position in imageData.data
+
+        for (let i = 0; i < output.length; i++) {
+          for (let j = 0; j < output[i].length; j++) {
+            const color = output[i][j];
+            this.imageData.data[k++] = color[0];
+            this.imageData.data[k++] = color[1];
+            this.imageData.data[k++] = color[2];
+            this.imageData.data[k++] = color[3]; // Alpha
+          }
         }
       }
 
-      if (maxForce == NaN) throw new Error("max force is nan");
-      if (minForce == NaN) throw new Error("min force is nan");
-
-      pixelForces = pixelForces.map((n) => (n / maxForce) * 255);
-
-      for (let i = 0; i < data.length; i += 4) {
-        const shadow = Math.floor(pixelForces[i / 4]);
-        data[i] = shadow;
-        data[i + 1] = 0;
-        data[i + 2] = 255 - shadow;
-        data[i + 3] = 255;
-      }
-
-      this.imageData = imageData;
+      this.ctx.putImageData(this.imageData, 0, 0);
     }
 
-    this.ctx.putImageData(this.imageData, 0, 0);
-  }
+    render(particles) {
+      // first run, compute background
+      this.renderBackground(particles);
 
-  render(particles) {
-    // first run, compute background
-    this.renderBackground(particles);
+      this.ctx.fillStyle = `rgb(0, 0, 0)`;
+      this.ctx.font = "10px Arial";
 
-    this.ctx.fillStyle = `rgb(0, 0, 0)`;
-    this.ctx.font = "10px Arial";
+      particles.forEach((p) => {
+        let pixelScale = PIXEL_SCALE;
 
-    particles.forEach((p) => {
-      let pixelScale = this.PIXEL_SCALE;
+        if (p.isStatic) {
+          pixelScale *= 4;
+        }
 
-      if (p.isStatic) {
-        pixelScale *= 4;
-      }
-
-      this.ctx.fillRect(
-        Math.floor(p.position.x) * this.SCALE,
-        Math.floor(p.position.y) * this.SCALE,
-        this.SCALE + pixelScale,
-        this.SCALE + pixelScale
-      );
-
-      if (this.SHOW_TEXT) {
-        const v = Math.round(Math.sqrt(Math.pow(p.velocity.x, 2) + Math.pow(p.velocity.y, 2)) * 100);
-
-        this.ctx.font = `10px Arial`;
-        this.ctx.fillText(
-          `[${Math.round(p.position.x)}, ${Math.round(p.position.y)}], <${Math.round(p.velocity.x * 100)}, ${Math.round(
-            p.velocity.y * 100
-          )}> ${v}`,
-          p.position.x * this.SCALE,
-          p.position.y * this.SCALE
+        this.ctx.fillRect(
+          Math.floor(p.position.x) * SCALE,
+          Math.floor(p.position.y) * SCALE,
+          SCALE + pixelScale,
+          SCALE + pixelScale
         );
-      }
-    });
-  }
-}
 
-const canvasElm = document.getElementById("canvas");
-const canvas = new Canvas(canvasElm);
+        if (this.SHOW_TEXT) {
+          const v = Math.round(Math.sqrt(Math.pow(p.velocity.x, 2) + Math.pow(p.velocity.y, 2)) * 100);
 
-function initParticles(particles) {
-  function addParticle(mass, p, v, isStatic = false) {
-    particles.push({
-      id: particles.length,
-      mass: mass,
-      position: p,
-      velocity: v,
-      isStatic,
-    });
-  }
-
-  function addGalaxy(mass, C, R, N) {
-    for (let i = 0; i < N; i++) {
-      const r = R * Math.sqrt(Math.random());
-      const theta = Math.random() * 2 * Math.PI;
-
-      const p = C.add(new Vec2(r * Math.sin(theta), r * Math.cos(theta)));
-
-      const v = C.distance(p)
-        .normal()
-        .to1()
-        .numMul(Math.random() * 10);
-
-      addParticle(1, p, v);
+          this.ctx.font = `10px Arial`;
+          this.ctx.fillText(
+            `[${Math.round(p.position.x)}, ${Math.round(p.position.y)}], <${Math.round(p.velocity.x * 100)}, ${Math.round(
+              p.velocity.y * 100
+            )}> ${v}`,
+            p.position.x * SCALE,
+            p.position.y * SCALE
+          );
+        }
+      });
     }
-
-    addParticle(mass, C, new Vec2(0, 0), true);
   }
 
-  addGalaxy(20000, new Vec2(canvas.SCALED_WIDTH / 2 + 1000, canvas.SCALED_HEIGHT / 2), 512, 100);
-  addGalaxy(100000, new Vec2(canvas.SCALED_WIDTH / 2 - 500, canvas.SCALED_HEIGHT / 2), 700, 100);
-}
+  const canvas = new Canvas(canvasElm);
 
-let particles = new Array();
-initParticles(particles);
+  function render() {
+    canvas.render(particles);
 
-function render() {
-  canvas.render(particles);
+    const totalVelocity = particles.reduce((acc, p) => Math.sqrt(Math.pow(p.velocity.x, 2) + Math.pow(p.velocity.y, 2)), 0);
+    canvas.ctx.fillText(`Velocity sum: ${totalVelocity}`, 10, 10);
+  }
 
-  const totalVelocity = particles.reduce((acc, p) => Math.sqrt(Math.pow(p.velocity.x, 2) + Math.pow(p.velocity.y, 2)), 0);
-  canvas.ctx.fillText(`Velocity sum: ${totalVelocity}`, 10, 10);
-}
+  const simulateKernel = gpu
+    .createKernel(function (particlesVec4, particlesVec3, G, SOFTENING) {
+      const idx = this.thread.x;
+      const px = particlesVec4[idx][0];
+      const py = particlesVec4[idx][1];
+      let vx = particlesVec4[idx][2];
+      let vy = particlesVec4[idx][3];
+      const mass = particlesVec3[idx][0];
+      const isStatic = particlesVec3[idx][2];
 
-function simulate() {
-  particles = particles.map((p) => {
-    if (p.isStatic) return p;
-
-    // compute forces from other particles using newton's law of universal gravitation
-    const a = new Vec2(0, 0);
-
-    particles.forEach((oP) => {
-      if (p.id === oP.id) {
-        return;
+      if (isStatic == 1.0) {
+        return [px, py, vx, vy];
       }
 
-      // distance
-      const dist = p.position.distance(oP.position);
-      const dSq = dist.lengthSq();
+      let ax = 0.0;
+      let ay = 0.0;
 
-      const f = (G * p.mass * oP.mass) / (dSq + 1);
-      a.inAdd(dist.numMul(f).numDiv(Math.sqrt(dSq)));
-    });
+      for (let i = 0; i < this.constants.particlesCount; i++) {
+        if (idx == i) continue;
 
-    // compute velocity
-    const v = p.velocity.add(a.numDiv(p.mass));
+        const oPx = particlesVec4[i][0];
+        const oPy = particlesVec4[i][1];
+        const oMass = particlesVec3[i][0];
 
-    // compute position
-    const newPosition = p.position.add(v);
+        const dx = oPx - px;
+        const dy = oPy - py;
+        const dSq = dx * dx + dy * dy;
 
-    return {
+        const f = (G * mass * oMass) / (dSq + 1);
+        const distInv = 1.0 / Math.sqrt(dSq + SOFTENING);
+
+        ax += dx * f * distInv;
+        ay += dy * f * distInv;
+      }
+
+      vx += ax / mass;
+      vy += ay / mass;
+
+      return [px + vx, py + vy, vx, vy];
+    })
+    .setOutput([particlesCount])
+    .setConstants({ particlesCount });
+
+  function simulate() {
+    const particlesVec4 = particles.map((p) => [p.position.x, p.position.y, p.velocity.x, p.velocity.y]);
+    const particlesVec3 = particles.map((p) => [p.mass, p.id, p.isStatic ? 1.0 : 0.0]);
+
+    const newParticlesVec4 = simulateKernel(particlesVec4, particlesVec3, G, 0.1e7);
+
+    particles = particles.map((p, i) => ({
       ...p,
-      position: newPosition,
-      velocity: v,
-    };
-  });
-}
+      position: new Vec2(newParticlesVec4[i][0], newParticlesVec4[i][1]),
+      velocity: new Vec2(newParticlesVec4[i][2], newParticlesVec4[i][3]),
+    }));
+    // .filter((p) => p.position.x >= 0 && p.position.y >= 0 && p.position.x <= SCALED_WIDTH && p.position.y <= SCALED_HEIGHT);
+  }
 
-function run() {
-  simulate();
-  render();
+  function run() {
+    // for (let i = 0; i <= 2; i++) {
+    simulate();
+    // }
 
-  requestAnimationFrame(run);
-  // setTimeout(run, 100);
-}
+    render();
 
-run();
+    requestAnimationFrame(run);
+  }
+
+  run();
+};

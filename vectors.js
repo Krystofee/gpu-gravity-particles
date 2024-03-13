@@ -8,7 +8,7 @@ class Vec2 {
     return new Vec2(this.y, -this.x);
   }
 
-  to1() {
+  normalize() {
     const l = this.length();
     this.x = this.x / l;
     this.y = this.y / l;
