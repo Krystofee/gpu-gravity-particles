@@ -1,6 +1,7 @@
 window.onload = function () {
-  const G = 6.6743;
-  const COMPUTE_BACKGROUND = false;
+  const G = 60.6743;
+  const COMPUTE_BACKGROUND = true;
+  const FRAMES_PER_RENDER = 10;
 
   const canvasElm = document.getElementById("canvas");
   const gpu = new GPU.GPU({ mode: "webgl2" });
@@ -48,8 +49,8 @@ window.onload = function () {
       addParticle(mass, C, new Vec2(0, 0), true);
     }
 
-    addGalaxy(100, new Vec2(SCALED_WIDTH / 2, SCALED_HEIGHT / 2), 1000, 20000);
-    addGalaxy(1000, new Vec2(SCALED_WIDTH / 2 - 1000, SCALED_HEIGHT / 2), 000, 2000);
+    addGalaxy(500, new Vec2(SCALED_WIDTH / 2, SCALED_HEIGHT / 2), 1000, 20000);
+    addGalaxy(5000, new Vec2(SCALED_WIDTH / 2 - 1000, SCALED_HEIGHT / 2), 1000, 2000);
   }
 
   let particles = new Array();
@@ -242,9 +243,9 @@ window.onload = function () {
   }
 
   function run() {
-    // for (let i = 0; i <= 2; i++) {
-    simulate();
-    // }
+    for (let i = 0; i <= FRAMES_PER_RENDER; i++) {
+      simulate();
+    }
 
     render();
 
